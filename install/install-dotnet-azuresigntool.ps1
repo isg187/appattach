@@ -126,7 +126,6 @@ try {
         if (-not (Test-Path $sdkPath) -or (Get-Item $sdkPath).Length -lt 1MB) {
             throw "NET SDK download failed or file is too small."
         }
-        Write-Log ("Download complete ({0:N1} MB)" -f ((Get-Item $sdkPath).Length / 1MB)) -Level SUCCESS
 
         Test-InstallerIntegrity -Path $sdkPath -ExpectedPublishers @('Microsoft Corporation','Microsoft') -ExpectedSha256 $ExpectedSha256
 
@@ -160,7 +159,6 @@ try {
         Write-Log "AzureSignTool 7.0.1 installed." -Level SUCCESS
     }
 
-    Write-Log ("dotnet --version : {0}" -f (& dotnet --version))
     $az = Get-Command AzureSignTool -ErrorAction SilentlyContinue
     if ($az) { Write-Log "AzureSignTool path: $($az.Source)" -Level SUCCESS }
     else { Write-Log "AzureSignTool not on PATH yet. New shells will pick up %USERPROFILE%\.dotnet\tools." -Level WARN }
