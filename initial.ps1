@@ -1,44 +1,43 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Dynamically fetches installer scripts from a GitHub repo (install folder)
-    without ZIP extraction, flattening, or manual script listing.
+    Downloads the azurecustom repo, flattens scripts to C:\ProgramData\SDL\scripts,
+    and runs every installer in the install folder.
+
 .DESCRIPTION
-    Uses GitHub Contents API to discover and download .ps1 files in /install.
-    Eliminates file corruption caused by ZIP extraction in AIB/Packer.
+    Single master script for Azure Image Builder / AVD image customization.
+    No parameters — all paths and behavior are hardcoded for GCC High builds.
 #>
 
-$ErrorActionPreference = "Stop"
-
-# === CONFIG ===
+$ErrorActionPreference = 'Stop'
 $Destination = "C:\ProgramData\SDL\scripts"
+$TempPath = "C:\Temp\SoftwareInstall"
+$RepoZipUrl = "https://github.com/isg187/azurecustom/archive/refs/heads/main.zip"
 $InstallDir = Join-Path $Destination "install"
 $LogDir = Join-Path $Destination "logs"
-$RepoOwner = "isg187"
-$RepoName = "appattach"
-$Branch = "main"
-$ApiUrl = "https://api.github.com/repos/$RepoOwner/$RepoName/contents/install?ref=$Branch"
-$Headers = @{ "User-Agent" = "AIB-Packer-Agent" }
 
+# Logger
 function Write-Log {
     param(
-        [Parameter(Position = 0)] [AllowEmptyString()] [string]$Message = "",
-        [ValidateSet("INFO", "WARN", "ERROR", "SUCCESS", "DEBUG")]
-        [string]$Level = "INFO"
+        [Parameter(Position = 0)]
+        [AllowEmptyString()]
+        [string]$Message = '',
+        [ValidateSet('INFO', 'WARN', 'ERROR', 'SUCCESS', 'DEBUG')]
+        [string]$Level = 'INFO'
     )
-    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
-    if ($Message -like '') {
-        $entry = ""
+    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    if ([string]::IsNullOrEmpty($Message)) {
+        $entry = ''
     }
     else {
         $entry = "[$ts] [$Level] $Message"
     }
 
     switch ($Level) {
-        "ERROR" { Write-Host $entry -ForegroundColor Red }
-        "WARN" { Write-Host $entry -ForegroundColor Yellow }
-        "SUCCESS" { Write-Host $entry -ForegroundColor Green }
+        'ERROR' { Write-Host $entry -ForegroundColor Red }
+        'WARN' { Write-Host $entry -ForegroundColor Yellow }
+        'SUCCESS' { Write-Host $entry -ForegroundColor Green }
         default { Write-Host $entry }
     }
 
@@ -53,71 +52,103 @@ function Write-Log {
         catch { }
     }
 }
-
+# Prepare folders and log
 try {
-    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+    if (Test-Path $TempPath) {
+        Remove-Item -Path $TempPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    New-Item -ItemType Directory -Path $TempPath -Force | Out-Null
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 
-    $script:LogPath = Join-Path $LogDir ("Bootstrap-And-Install_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+    $script:LogPath = Join-Path $LogDir ("Bootstrap-And-Install_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
 
-    Write-Log "===== Bootstrap And Install (GitHub API Version) ====="
+    Write-Log "===== Bootstrap And Install (Master) ====="
     Write-Log "Destination : $Destination"
     Write-Log "InstallDir  : $InstallDir"
-    Write-Log "API URL     : $ApiUrl"
+    Write-Log "TempPath    : $TempPath"
+    Write-Log "Zip URL     : $RepoZipUrl"
     Write-Log "Log         : $script:LogPath"
 
-    # === GET DIRECTORY LISTING FROM GITHUB ===
-    Write-Log "Querying GitHub API for installer scripts..."
-    $response = Invoke-WebRequest -Uri $ApiUrl -Headers $Headers -UseBasicParsing
+    # Download repo zip
+    $zipPath = Join-Path $TempPath "azurecustom.zip"
+    Write-Log "Downloading repository zip..."
+    Invoke-WebRequest -Uri $RepoZipUrl -OutFile $zipPath -UseBasicParsing
 
-    $items = $response.Content | ConvertFrom-Json
-    $psScripts = $items | Where-Object { $_.type -eq "file" -and $_.name -like "*.ps1" }
+    if (-not (Test-Path $zipPath) -or (Get-Item $zipPath).Length -lt 1KB) {
+        throw "Download failed or zip file is empty."
+    }
+    Write-Log "Download complete ($([math]::Round((Get-Item $zipPath).Length / 1KB, 1)) KB)" -Level SUCCESS
 
-    if ($psScripts.Count -eq 0) {
-        Write-Log "No .ps1 installer scripts found in GitHub repo install folder." -Level ERROR
-        throw "Install folder is empty."
+    # Extract into Destination
+    Write-Log "Extracting zip to $Destination ..."
+    Expand-Archive -Path $zipPath -DestinationPath $Destination -Force
+
+    # Flatten single root folder (e.g. azurecustom-main)
+    $rootFolder = Get-ChildItem -Path $Destination -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like "azurecustom-*" -or $_.Name -like "*-main" -or $_.Name -like "*-master" } |
+    Select-Object -First 1
+
+    if (-not $rootFolder) {
+        # Fallback: any single top-level directory that contains an install folder
+        $dirs = @(Get-ChildItem -Path $Destination -Directory -ErrorAction SilentlyContinue)
+        if ($dirs.Count -eq 1 -and (Test-Path (Join-Path $dirs[0].FullName "install"))) {
+            $rootFolder = $dirs[0]
+        }
     }
 
-    Write-Log "Found $($psScripts.Count) installer scripts:"
-    $psScripts | ForEach-Object { Write-Log "  - $($_.name)" }
-
-    # === DOWNLOAD ALL INSTALLER SCRIPTS ===
-    foreach ($s in $psScripts) {
-        $outFile = Join-Path $InstallDir $s.name
-        Write-Log "Downloading: $($s.name)"
-        Invoke-WebRequest -Uri $s.download_url -OutFile $outFile -UseBasicParsing
-
-        # Enforce UTF-8 (prevents any encoding weirdness)
-        $raw = Get-Content $outFile -Raw
-        Set-Content -Path $outFile -Value $raw -Encoding UTF8
+    if ($rootFolder) {
+        Write-Log "Flattening extracted folder: $($rootFolder.Name)"
+        Get-ChildItem -Path $rootFolder.FullName -Force | Move-Item -Destination $Destination -Force
+        Remove-Item -Path $rootFolder.FullName -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    # === DISCOVER INSTALLER SCRIPTS LOCALLY ===
-    $installerScripts = Get-ChildItem -Path $InstallDir -Filter "*.ps1" -File | Sort-Object Name
+    # Verify install folder
+    if (-not (Test-Path -LiteralPath $InstallDir -PathType Container)) {
+        Write-Log "Install folder not found after extract: $InstallDir" -Level ERROR
+        Write-Log "Contents of Destination:" -Level ERROR
+        Get-ChildItem -Path $Destination -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Log "  $($_.FullName)" -Level ERROR
+        }
+        throw "Install directory missing: $InstallDir"
+    }
+
+    $installerScripts = @(
+        Get-ChildItem -Path $InstallDir -Filter "*.ps1" -File -ErrorAction Stop |
+        Where-Object { $_.Name -notmatch '(?i)^Install-All\.ps1$' } |
+        Sort-Object Name
+    )
 
     if ($installerScripts.Count -eq 0) {
-        throw "Installer scripts missing after download."
+        throw "No installer .ps1 files found in $InstallDir"
     }
 
-    Write-Log "Ready to execute installers:"
+    Write-Log "Discovered $($installerScripts.Count) installer script(s):"
     $installerScripts | ForEach-Object { Write-Log "  - $($_.Name)" }
 
-    # === RUN INSTALLER SCRIPTS ===
+    # Run each installer
     $results = @()
     $overallSuccess = $true
 
     foreach ($scriptFile in $installerScripts) {
+        $scriptPath = $scriptFile.FullName
         $name = $scriptFile.BaseName
-        $path = $scriptFile.FullName
 
         Write-Log "--------------------------------------------------"
-        Write-Log "Starting installer: $name"
-        Write-Log "Script: $path"
+        Write-Log "Starting: $name"
+        Write-Log "Script  : $scriptPath"
 
         try {
-            $proc = Start-Process "powershell.exe" `
-                -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $path, "-Force" -Wait -PassThru -NoNewWindow
+            $argList = @(
+                "-NoProfile"
+                "-ExecutionPolicy", "Bypass"
+                "-File", $scriptPath
+                "-Force"
+            )
+
+            $proc = Start-Process -FilePath "powershell.exe" `
+                -ArgumentList $argList `
+                -Wait -PassThru -NoNewWindow
 
             if ($proc.ExitCode -eq 0) {
                 Write-Log "$name completed successfully." -Level SUCCESS
@@ -125,8 +156,9 @@ try {
             }
             else {
                 Write-Log "$name failed with exit code $($proc.ExitCode)." -Level ERROR
-                $results += [pscustomobject]@{ Name = $name; Success = $false; Message = "Exit $($proc.ExitCode)" }
+                $results += [pscustomobject]@{ Name = $name; Success = $false; Message = "Exit code $($proc.ExitCode)" }
                 $overallSuccess = $false
+                # Continue remaining installers so one failure does not skip the rest
             }
         }
         catch {
@@ -136,15 +168,17 @@ try {
         }
     }
 
-    # === SUMMARY ===
+    # Summary
     Write-Log "=============================================="
-    Write-Log "Summary"
+    Write-Log "  Summary"
     Write-Log "=============================================="
-
-    foreach ($r in $results) {
-        $status = if ($r.Success) { "SUCCESS" } else { "FAILED" }
-        Write-Log ("{0,-35} {1}" -f $r.Name, $status)
+    $results | ForEach-Object {
+        $status = if ($_.Success) { "SUCCESS" } else { "FAILED" }
+        Write-Log ("{0,-40} {1}" -f $_.Name, $status)
     }
+
+    # Cleanup temp only
+    Remove-Item -Path $TempPath -Recurse -Force -ErrorAction SilentlyContinue
 
     if ($overallSuccess) {
         Write-Log "All installers completed successfully." -Level SUCCESS
@@ -152,12 +186,16 @@ try {
         exit 0
     }
     else {
-        Write-Log "One or more installations failed." -Level ERROR
+        Write-Log "One or more installations failed. Review the log: $script:LogPath" -Level ERROR
         exit 1
     }
-
 }
 catch {
-    Write-Log "MASTER SCRIPT FAILED: $($_.Exception.Message)" -Level ERROR
+    if (Get-Command Write-Log -ErrorAction SilentlyContinue) {
+        Write-Log "MASTER SCRIPT FAILED: $($_.Exception.Message)" -Level ERROR
+    }
+    else {
+        Write-Host "[ERROR] MASTER SCRIPT FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    }
     exit 1
 }
