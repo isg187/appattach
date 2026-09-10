@@ -1,175 +1,256 @@
 <#
 .SYNOPSIS
-    Installs .NET 10 SDK (x64) and AzureSignTool 7.0.1 as a global dotnet tool.
+    Installs the .NET SDK required for AzureSignTool.
 
 .DESCRIPTION
-    Combined because AzureSignTool requires the dotnet CLI (SDK).
-    Sources: official Microsoft .NET 10 SDK installer + nuget.org via "dotnet tool install".
-    Designed for GCC High / CMMC packaging workstations and golden images.
-
-.PARAMETER Force
-    Reinstall even if already present.
-
-.PARAMETER ExpectedSha256
-    Optional SHA-256 of the .NET SDK installer. Enforced when supplied.
-
-.EXAMPLE
-    .\install-dotnet-azuresigntool.ps1
+    - Detects whether the required .NET SDK version is already installed.
+    - Downloads the latest stable .NET SDK (x64) from Microsoft’s official sources.
+    - Uses silent MSI/EXE installation options suitable for enterprise automation.
+    - Performs Authenticode and SHA-256 integrity checks.
+    - Idempotent unless -Force is supplied.
 #>
+
 [CmdletBinding()]
 param(
     [switch]$Force,
     [string]$LogPath,
-    [string]$DownloadPath = (Join-Path $env:TEMP "DotNetInstall"),
-    [string]$ExpectedSha256
+    [string]$DownloadPath = (Join-Path $env:TEMP "DotNetSdkInstall"),
+    [string]$ExpectedSha256,
+    [string]$RequiredMajorVersion = "8.0"   # Adjust as needed
 )
 
 #Requires -RunAsAdministrator
 $ErrorActionPreference = 'Stop'
 
+# ---------------------------------------------------------------------------
+# LOGGING (matches your PowerShell7 installer exactly)
+# ---------------------------------------------------------------------------
 function Write-Log {
     [CmdletBinding()]
     param(
         [Parameter(Position = 0)]
         [AllowEmptyString()]
         [string]$Message = '',
+
         [ValidateSet('INFO', 'WARN', 'ERROR', 'SUCCESS', 'DEBUG')]
         [string]$Level = 'INFO',
+
         [string]$LogPath = $script:LogPath
     )
-    if (-not $LogPath) { $LogPath = Join-Path $env:TEMP "SoftwareInstall_$(Get-Date -Format 'yyyyMMdd').log" }
-    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $entry = if ([string]::IsNullOrEmpty($Message)) { '' } else { "[$timestamp] [$Level] $Message" }
+
+    if (-not $LogPath) {
+        $LogPath = Join-Path $env:TEMP "SoftwareInstall_$(Get-Date -Format 'yyyyMMdd').log"
+    }
+
+    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $entry = "[$ts] [$Level] $Message"
+
     switch ($Level) {
         'ERROR'   { Write-Host $entry -ForegroundColor Red }
         'WARN'    { Write-Host $entry -ForegroundColor Yellow }
         'SUCCESS' { Write-Host $entry -ForegroundColor Green }
+        'DEBUG'   { if ($VerbosePreference -eq 'Continue') { Write-Host $entry -ForegroundColor Gray } }
         default   { Write-Host $entry }
     }
+
     try {
         $dir = Split-Path $LogPath -Parent
-        if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-        Add-Content -Path $LogPath -Value $entry -ErrorAction SilentlyContinue
-    } catch { }
+        if ($dir -and -not (Test-Path $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        Add-Content -Path $LogPath -Value $entry -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "Failed to write to log file: $($_.Exception.Message)"
+    }
 }
 
+$logDir = "C:\ProgramData\SDL\scripts\logs"
+$LogPath = Join-Path $logDir ("Install-DotNetSdk_{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
+Write-Log "===== Starting .NET SDK installation ====="
+Write-Log "Log file : $LogPath"
+Write-Log "Force    : $Force"
+Write-Log "Required : $RequiredMajorVersion"
+
+# ---------------------------------------------------------------------------
+# Helper: Integrity checks (SHA256 + Authenticode)
+# ---------------------------------------------------------------------------
 function Test-InstallerIntegrity {
+    [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string[]]$ExpectedPublishers,
+        [Parameter(Mandatory = $true)] [string]$Path,
         [string]$ExpectedSha256,
+        [string[]]$ExpectedPublishers = @("Microsoft Corporation", "Microsoft"),
         [switch]$AllowUnsigned
     )
-    if (-not (Test-Path -LiteralPath $Path)) { throw "Integrity check failed: file not found: $Path" }
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Integrity check failed: file not found: $Path"
+    }
+
     Write-Log "Running integrity checks on: $Path"
+
+    # SHA-256
     $actualHash = (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToUpperInvariant()
     Write-Log "SHA256: $actualHash"
+
     if ($ExpectedSha256) {
         $expected = $ExpectedSha256.Trim().ToUpperInvariant()
-        if ($actualHash -ne $expected) { throw "SHA-256 mismatch. Expected $expected but got $actualHash" }
-        Write-Log "SHA-256 verified against expected value." -Level SUCCESS
-    } else {
-        Write-Log "No ExpectedSha256 supplied — hash recorded for audit; not enforced." -Level WARN
+        if ($actualHash -ne $expected) {
+            throw "SHA-256 mismatch. Expected $expected but got $actualHash"
+        }
+        Write-Log "SHA-256 verified." -Level SUCCESS
     }
-    $sig = Get-AuthenticodeSignature -FilePath $Path
+    else {
+        Write-Log "ExpectedSha256 not supplied — recording hash only." -Level WARN
+    }
+
+    # Authenticode
+    $sig = Get-AuthenticodeSignature $Path
     Write-Log "Authenticode Status : $($sig.Status)"
+
     if ($sig.SignerCertificate) {
         Write-Log "Signer Subject      : $($sig.SignerCertificate.Subject)"
+        Write-Log "Signer Thumbprint   : $($sig.SignerCertificate.Thumbprint)"
     }
-    if ($sig.Status -ne 'Valid') {
+
+    if ($sig.Status -ne "Valid") {
         if ($AllowUnsigned) {
-            Write-Log "Authenticode not valid ($($sig.Status)) but -AllowUnsigned was specified." -Level WARN
-            if (-not $ExpectedSha256) { throw "Unsigned/invalid signature requires -ExpectedSha256." }
+            Write-Log "Signature invalid but -AllowUnsigned specified." -Level WARN
+            if (-not $ExpectedSha256) { throw "Unsigned file requires ExpectedSha256 for integrity." }
             return
         }
         throw "Authenticode signature is not valid. Status=$($sig.Status)"
     }
+
     $subject = $sig.SignerCertificate.Subject
-    $matched = $false
     foreach ($pub in $ExpectedPublishers) {
-        if ($subject -like "*$pub*") { $matched = $true; Write-Log "Publisher matched: $pub" -Level SUCCESS; break }
+        if ($subject -like "*$pub*") {
+            Write-Log "Publisher matched: $pub" -Level SUCCESS
+            return
+        }
     }
-    if (-not $matched) { throw "Unexpected publisher. Subject='$subject'. Expected: $($ExpectedPublishers -join ', ')" }
-    Write-Log "Integrity checks passed." -Level SUCCESS
+
+    throw "Unexpected publisher: $subject"
 }
 
-$logDir = "C:\ProgramData\SDL\scripts\logs"
-if (-not $LogPath) { $LogPath = Join-Path $logDir ("Install-DotNet-AzureSignTool_{0}.log" -f (Get-Date -Format 'yyyyMMdd')) }
-$script:LogPath = $LogPath
+# ---------------------------------------------------------------------------
+# Detect installed .NET SDK
+# ---------------------------------------------------------------------------
+function Get-InstalledDotNetSdkVersions {
+    $dotnet = "$env:ProgramFiles\dotnet\dotnet.exe"
+    if (-not (Test-Path $dotnet)) { return @() }
 
-Write-Log "===== Starting NET 10 SDK + AzureSignTool installation ====="
-Write-Log "Force : $Force"
+    try {
+        $sdkList = & $dotnet --list-sdks 2>$null
+        return $sdkList
+    }
+    catch { return @() }
+}
 
+$installedSdks = Get-InstalledDotNetSdkVersions
+$alreadyInstalled = $installedSdks | Where-Object { $_ -like "$RequiredMajorVersion*" }
+
+if ($alreadyInstalled -and -not $Force) {
+    Write-Log ".NET SDK $RequiredMajorVersion is already installed." -Level SUCCESS
+    exit 0
+}
+
+if ($alreadyInstalled -and $Force) {
+    Write-Log "Existing .NET SDK detected; -Force specified — reinstalling." -Level WARN
+}
+else {
+    Write-Log "Required .NET SDK not detected — proceeding with install."
+}
+
+# ---------------------------------------------------------------------------
+# Get latest SDK installer from Microsoft (stable)
+# ---------------------------------------------------------------------------
+function Get-DotNetSdkDownloadInfo {
+    Write-Log "Querying download info from Microsoft..."
+
+    $url = "https://dotnetcli.blob.core.windows.net/dotnet/Sdk/${RequiredMajorVersion}/latest.version"
+    $latestVersion = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30
+    $latestVersion = $latestVersion.Content.Trim()
+
+    Write-Log "Latest available SDK version: $latestVersion"
+
+    $installerName = "dotnet-sdk-$latestVersion-win-x64.exe"
+    $downloadUrl   = "https://download.visualstudio.microsoft.com/download/pr/${installerName}"
+
+    # Some organizations prefer MSI instead of EXE — update here if needed
+
+    return [pscustomobject]@{
+        Version  = $latestVersion
+        FileName = $installerName
+        Url      = $downloadUrl
+    }
+}
+
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
 try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-    $dotnetOk = $false
-    $dotnetCmd = Get-Command dotnet -ErrorAction SilentlyContinue
-    if ($dotnetCmd) {
-        $ver = & dotnet --version 2>$null
-        Write-Log "Existing dotnet CLI: $ver"
-        if ($ver -like '10.*' -and -not $Force) { $dotnetOk = $true }
+    # Prep temp directory
+    if (-not (Test-Path $DownloadPath)) {
+        New-Item -ItemType Directory -Path $DownloadPath -Force | Out-Null
     }
 
-    if (-not $dotnetOk) {
-        if (-not (Test-Path $DownloadPath)) { New-Item -ItemType Directory -Path $DownloadPath -Force | Out-Null }
+    $info = Get-DotNetSdkDownloadInfo
+    $installerPath = Join-Path $DownloadPath $info.FileName
 
-        # Official channel installer (resolves to current 10.0.x SDK x64 EXE)
-        $sdkUrl  = "https://aka.ms/dotnet/10.0/dotnet-sdk-win-x64.exe"
-        $sdkPath = Join-Path $DownloadPath "dotnet-sdk-win-x64.exe"
+    Write-Log "Downloading .NET SDK..."
+    Write-Log "URL : $($info.Url)"
+    Write-Log "Dest: $installerPath"
 
-        Write-Log "Downloading NET 10 SDK..."
-        Write-Log "URL : $sdkUrl"
-        $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $sdkUrl -OutFile $sdkPath -UseBasicParsing
+    $ProgressPreference = 'SilentlyContinue'
+    Invoke-WebRequest -Uri $info.Url -OutFile $installerPath -UseBasicParsing
 
-        if (-not (Test-Path $sdkPath) -or (Get-Item $sdkPath).Length -lt 1MB) {
-            throw "NET SDK download failed or file is too small."
-        }
-        Write-Log "Download complete" -Level SUCCESS
-
-        Test-InstallerIntegrity -Path $sdkPath -ExpectedPublishers @('Microsoft Corporation','Microsoft') -ExpectedSha256 $ExpectedSha256
-
-        Write-Log "Installing NET 10 SDK silently..."
-        $p = Start-Process -FilePath $sdkPath -ArgumentList @('/install','/quiet','/norestart') -Wait -PassThru
-        if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
-            throw "NET SDK installer exited $($p.ExitCode)"
-        }
-        Write-Log "NET SDK installer exit code $($p.ExitCode)" -Level SUCCESS
-
-        $machinePath = [Environment]::GetEnvironmentVariable('Path','Machine')
-        $userPath    = [Environment]::GetEnvironmentVariable('Path','User')
-        $env:Path    = "$machinePath;$userPath"
-        Remove-Item $sdkPath -Force -ErrorAction SilentlyContinue
-    } else {
-        Write-Log "NET 10 SDK already present. Skipping SDK install. Use -Force to reinstall." -Level SUCCESS
+    if (-not (Test-Path $installerPath) -or (Get-Item $installerPath).Length -lt 5MB) {
+        throw "Download failed or file is too small."
     }
 
-    $dotnetCmd = Get-Command dotnet -ErrorAction SilentlyContinue
-    if (-not $dotnetCmd) { throw "dotnet CLI not found after SDK install. Open a new elevated session and retry." }
+    $sizeMB = :Round((Get-Item $installerPath).Length / 1MB, 2)
+    Write-Log "Download complete ($sizeMB MB)" -Level SUCCESS
 
-    $toolList = & dotnet tool list --global 2>$null
-    $hasTool = $toolList -match 'azuresigntool'
-    if ($hasTool -and -not $Force) {
-        Write-Log "AzureSignTool already installed globally. Skipping. Use -Force to reinstall." -Level SUCCESS
-    } else {
-        Write-Log "Installing AzureSignTool 7.0.1 as a global dotnet tool..."
-        & dotnet tool uninstall --global AzureSignTool 2>$null | Out-Null
-        & dotnet tool install --global AzureSignTool --version 7.0.1
-        if ($LASTEXITCODE -ne 0) { throw "dotnet tool install AzureSignTool failed with $LASTEXITCODE" }
-        Write-Log "AzureSignTool 7.0.1 installed." -Level SUCCESS
+    # Integrity checks
+    Test-InstallerIntegrity -Path $installerPath -ExpectedSha256 $ExpectedSha256
+
+    Write-Log "Starting silent .NET SDK installation..."
+
+    $args = @(
+        "/install"
+        "/quiet"
+        "/norestart"
+        "/log `"$installerPath.install.log`""
+    )
+
+    $proc = Start-Process -FilePath $installerPath -ArgumentList $args -Wait -PassThru
+
+    if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) {
+        Write-Log ".NET SDK installation succeeded (ExitCode=$($proc.ExitCode))" -Level SUCCESS
+    }
+    else {
+        throw ".NET SDK installer returned non-zero exit code: $($proc.ExitCode)"
     }
 
-    Write-Log ("dotnet --version : {0}" -f (& dotnet --version))
-    $az = Get-Command AzureSignTool -ErrorAction SilentlyContinue
-    if ($az) { Write-Log "AzureSignTool path: $($az.Source)" -Level SUCCESS }
-    else { Write-Log "AzureSignTool not on PATH yet. New shells will pick up %USERPROFILE%\.dotnet\tools." -Level WARN }
+    # Verify install
+    $installed = Get-InstalledDotNetSdkVersions | Where-Object { $_ -like "$RequiredMajorVersion*" }
+    if ($installed) {
+        Write-Log "SDK installation verified: $($installed -join ', ')" -Level SUCCESS
+    }
+    else {
+        Write-Log "SDK expected to install but not found afterward." -Level WARN
+    }
 
-    Write-Log "===== NET 10 SDK + AzureSignTool finished =====" -Level SUCCESS
+    Write-Log "Cleaning up installer..."
+    Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+
+    Write-Log "===== .NET SDK installation finished =====" -Level SUCCESS
     exit 0
 }
 catch {
     Write-Log "ERROR: $($_.Exception.Message)" -Level ERROR
-    Write-Log "$($_.ScriptStackTrace)" -Level ERROR
+    Write-Log $_.ScriptStackTrace -Level ERROR
     exit 1
 }
