@@ -112,6 +112,11 @@ try {
         }
         throw "Install directory missing: $InstallDir"
     }
+    # Correct files for UTF8 format.
+    Get-ChildItem "C:\ProgramData\SDL\scripts\install" -Filter *.ps1 | ForEach-Object {
+        $raw = Get-Content $_.FullName -Raw
+        Set-Content -Path $_.FullName -Value $raw -Encoding UTF8
+    }
 
     $installerScripts = @(
         Get-ChildItem -Path $InstallDir -Filter "*.ps1" -File -ErrorAction Stop |
