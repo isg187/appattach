@@ -28,7 +28,7 @@ function Write-Log {
     )
     $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
-    if (:IsNullOrEmpty($Message)) {
+    if ($Message -like '') {
         $entry = ""
     }
     else {
