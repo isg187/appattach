@@ -143,8 +143,6 @@ try {
     if (-not (Test-Path $exe) -or (Get-Item $exe).Length -lt 1MB) {
         throw "Windows SDK download failed or file is too small."
     }
-    Write-Log ("Download complete ({0:N1} MB)" -f ((Get-Item $exe).Length / 1MB)) -Level SUCCESS
-
     Test-InstallerIntegrity -Path $exe -ExpectedPublishers @('Microsoft Corporation','Microsoft') -ExpectedSha256 $ExpectedSha256
 
     $sdkLog = Join-Path $DownloadPath "winsdksetup.log"
