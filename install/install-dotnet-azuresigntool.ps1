@@ -97,7 +97,7 @@ $logDir = "C:\ProgramData\SDL\scripts\logs"
 if (-not $LogPath) { $LogPath = Join-Path $logDir ("Install-DotNet-AzureSignTool_{0}.log" -f (Get-Date -Format 'yyyyMMdd')) }
 $script:LogPath = $LogPath
 
-Write-Log "===== Starting .NET 10 SDK + AzureSignTool installation ====="
+Write-Log "===== Starting NET 10 SDK + AzureSignTool installation ====="
 Write-Log "Force : $Force"
 
 try {
@@ -118,7 +118,7 @@ try {
         $sdkUrl  = "https://aka.ms/dotnet/10.0/dotnet-sdk-win-x64.exe"
         $sdkPath = Join-Path $DownloadPath "dotnet-sdk-win-x64.exe"
 
-        Write-Log "Downloading .NET 10 SDK..."
+        Write-Log "Downloading NET 10 SDK..."
         Write-Log "URL : $sdkUrl"
         $ProgressPreference = 'SilentlyContinue'
         Invoke-WebRequest -Uri $sdkUrl -OutFile $sdkPath -UseBasicParsing
@@ -126,10 +126,11 @@ try {
         if (-not (Test-Path $sdkPath) -or (Get-Item $sdkPath).Length -lt 1MB) {
             throw "NET SDK download failed or file is too small."
         }
+        Write-Log "Download complete" -Level SUCCESS
 
         Test-InstallerIntegrity -Path $sdkPath -ExpectedPublishers @('Microsoft Corporation','Microsoft') -ExpectedSha256 $ExpectedSha256
 
-        Write-Log "Installing .NET 10 SDK silently..."
+        Write-Log "Installing NET 10 SDK silently..."
         $p = Start-Process -FilePath $sdkPath -ArgumentList @('/install','/quiet','/norestart') -Wait -PassThru
         if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
             throw "NET SDK installer exited $($p.ExitCode)"
@@ -141,7 +142,7 @@ try {
         $env:Path    = "$machinePath;$userPath"
         Remove-Item $sdkPath -Force -ErrorAction SilentlyContinue
     } else {
-        Write-Log ".NET 10 SDK already present. Skipping SDK install. Use -Force to reinstall." -Level SUCCESS
+        Write-Log "NET 10 SDK already present. Skipping SDK install. Use -Force to reinstall." -Level SUCCESS
     }
 
     $dotnetCmd = Get-Command dotnet -ErrorAction SilentlyContinue
@@ -159,11 +160,12 @@ try {
         Write-Log "AzureSignTool 7.0.1 installed." -Level SUCCESS
     }
 
+    Write-Log ("dotnet --version : {0}" -f (& dotnet --version))
     $az = Get-Command AzureSignTool -ErrorAction SilentlyContinue
     if ($az) { Write-Log "AzureSignTool path: $($az.Source)" -Level SUCCESS }
     else { Write-Log "AzureSignTool not on PATH yet. New shells will pick up %USERPROFILE%\.dotnet\tools." -Level WARN }
 
-    Write-Log "===== .NET 10 SDK + AzureSignTool finished =====" -Level SUCCESS
+    Write-Log "===== NET 10 SDK + AzureSignTool finished =====" -Level SUCCESS
     exit 0
 }
 catch {

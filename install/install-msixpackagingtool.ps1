@@ -146,6 +146,7 @@ try {
     if (-not (Test-Path $bundlePath) -or (Get-Item $bundlePath).Length -lt 1MB) {
         throw "MSIX Packaging Tool download failed or file is too small."
     }
+    Write-Log "Download complete" -Level SUCCESS
 
     Test-InstallerIntegrity -Path $bundlePath -ExpectedPublishers @('Microsoft Corporation','Microsoft') -ExpectedSha256 $ExpectedSha256
 

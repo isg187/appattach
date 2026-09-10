@@ -264,6 +264,9 @@ try {
         throw "Download failed or file is too small."
     }
 
+    $fileSizeMB = [math]::Round((Get-Item $msiPath).Length / 1MB, 2)
+    Write-Log "Download complete ($fileSizeMB MB)" -Level SUCCESS
+
     # Integrity checks (Authenticode + SHA-256)
     Test-InstallerIntegrity -Path $msiPath `
         -ExpectedPublishers @('Microsoft Corporation', 'Microsoft') `
