@@ -67,9 +67,7 @@ function Get-MsixDriverState {
 }
 
 function Get-InstalledMsixPackagingTool {
-    Get-AppxPackage -Name $script:AppxName -ErrorAction SilentlyContinue |
-    Sort-Object Version |
-    Select-Object -Last 1
+    Get-AppxPackage -Name $script:AppxName -ErrorAction SilentlyContinue | Sort-Object Version | Select-Object -Last 1
 }
 
 function Test-BundleIntegrity {
