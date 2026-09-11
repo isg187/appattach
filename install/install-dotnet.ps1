@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Installs the latest .NET SDK 10 and the AzureSignTool global tool.
+    Installs the latest .NET SDK 10.
 
 .PARAMETER Force
     Reinstall even if already present.
@@ -187,66 +187,6 @@ function Update-SessionPath {
     $env:Path = $machine + ';' + $user
 }
 
-function Get-DotNetExe {
-    Update-SessionPath
-    $dotnetExe = Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'
-    if (Test-Path $dotnetExe) { return $dotnetExe }
-
-    $cmd = Get-Command dotnet -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
-
-    return $null
-}
-
-function Get-InstalledAzureSignToolVersion {
-    $dotnetExe = Get-DotNetExe
-    if (-not $dotnetExe) { return $null }
-
-    $lines = & $dotnetExe tool list --global 2>$null
-    foreach ($line in $lines) {
-        if ($line -match 'azuresigntool\s+(\S+)') {
-            return $Matches[1]
-        }
-    }
-    return $null
-}
-
-function Install-AzureSignTool {
-    param([switch]$Force)
-
-    $dotnetExe = Get-DotNetExe
-    if (-not $dotnetExe) {
-        throw 'dotnet.exe was not found after SDK install.'
-    }
-
-    $installed = Get-InstalledAzureSignToolVersion
-    if ($installed -and -not $Force) {
-        $action = 'update'
-        Write-Log "Updating AzureSignTool from $installed"
-    }
-    elseif ($installed -and $Force) {
-        $action = 'update'
-        Write-Log "Reinstalling AzureSignTool from $installed"
-    }
-    else {
-        $action = 'install'
-        Write-Log 'Installing AzureSignTool'
-    }
-
-    & $dotnetExe tool $action --global AzureSignTool
-    if ($LASTEXITCODE -ne 0) {
-        throw "dotnet tool $action AzureSignTool failed with exit code $LASTEXITCODE"
-    }
-
-    $newVersion = Get-InstalledAzureSignToolVersion
-    if ($newVersion) {
-        Write-Log "AzureSignTool ready: $newVersion" -Level SUCCESS
-    }
-    else {
-        Write-Log 'AzureSignTool command completed but version was not detected.' -Level WARN
-    }
-}
-
 if ($LogPath) {
     $script:LogPath = $LogPath
 }
@@ -255,19 +195,20 @@ else {
     $script:LogPath = Join-Path $logDir ("Install-DotNetSdk10_{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
 }
 
-Write-Log 'Starting .NET SDK 10 and AzureSignTool install'
+Write-Log 'Starting .NET SDK 10 install'
 
 try {
     $downloadInfo = Get-LatestDotNetSdk10Info
     $installedSdks = @(Get-InstalledDotNetSdk10Versions)
     $latestInstalled = $installedSdks | Select-Object -Last 1
-    $sdkNeedsInstall = $true
 
     if ($latestInstalled -and -not $Force -and ([version]$latestInstalled -ge [version]$downloadInfo.Version)) {
         Write-Log ('.NET SDK {0} already installed' -f $latestInstalled) -Level SUCCESS
-        $sdkNeedsInstall = $false
+        Write-Log 'Install finished' -Level SUCCESS
+        exit 0
     }
-    elseif ($latestInstalled -and $Force) {
+
+    if ($latestInstalled -and $Force) {
         Write-Log ('.NET SDK {0} found; Force specified' -f $latestInstalled) -Level WARN
     }
     elseif ($latestInstalled) {
@@ -277,57 +218,53 @@ try {
         Write-Log ('.NET SDK 10 not found; installing {0}' -f $downloadInfo.Version)
     }
 
-    if ($sdkNeedsInstall) {
-        if (-not (Test-Path $DownloadPath)) {
-            New-Item -ItemType Directory -Path $DownloadPath -Force | Out-Null
-        }
-
-        $installerPath = Join-Path $DownloadPath $downloadInfo.FileName
-        Write-Log ('Downloading .NET SDK {0}' -f $downloadInfo.Version)
-
-        $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $downloadInfo.Url -OutFile $installerPath -UseBasicParsing
-
-        if (-not (Test-Path $installerPath) -or (Get-Item $installerPath).Length -lt 5MB) {
-            throw 'Download failed or file is too small.'
-        }
-
-        $integrityParams = @{
-            Path               = $installerPath
-            ExpectedPublishers = @('Microsoft Corporation', 'Microsoft')
-            ExpectedSha512     = $downloadInfo.Sha512
-        }
-        if ($ExpectedSha256) {
-            $integrityParams['ExpectedSha256'] = $ExpectedSha256
-        }
-        Test-InstallerIntegrity @integrityParams
-
-        Write-Log 'Installing .NET SDK'
-        $processParams = @{
-            FilePath     = $installerPath
-            ArgumentList = @('/install', '/quiet', '/norestart')
-            Wait         = $true
-            PassThru     = $true
-        }
-        $process = Start-Process @processParams
-
-        if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
-            throw "Installer returned non-zero exit code: $($process.ExitCode)"
-        }
-
-        Update-SessionPath
-        $newSdks = @(Get-InstalledDotNetSdk10Versions)
-        if ($newSdks) {
-            Write-Log ('.NET SDK installed: {0}' -f ($newSdks -join ', ')) -Level SUCCESS
-        }
-        else {
-            Write-Log 'SDK installer succeeded but version was not detected.' -Level WARN
-        }
-
-        Remove-Item -Path $installerPath -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path $DownloadPath)) {
+        New-Item -ItemType Directory -Path $DownloadPath -Force | Out-Null
     }
 
-    Install-AzureSignTool -Force:$Force
+    $installerPath = Join-Path $DownloadPath $downloadInfo.FileName
+    Write-Log ('Downloading .NET SDK {0}' -f $downloadInfo.Version)
+
+    $ProgressPreference = 'SilentlyContinue'
+    Invoke-WebRequest -Uri $downloadInfo.Url -OutFile $installerPath -UseBasicParsing
+
+    if (-not (Test-Path $installerPath) -or (Get-Item $installerPath).Length -lt 5MB) {
+        throw 'Download failed or file is too small.'
+    }
+
+    $integrityParams = @{
+        Path               = $installerPath
+        ExpectedPublishers = @('Microsoft Corporation', 'Microsoft')
+        ExpectedSha512     = $downloadInfo.Sha512
+    }
+    if ($ExpectedSha256) {
+        $integrityParams['ExpectedSha256'] = $ExpectedSha256
+    }
+    Test-InstallerIntegrity @integrityParams
+
+    Write-Log 'Installing .NET SDK'
+    $processParams = @{
+        FilePath     = $installerPath
+        ArgumentList = @('/install', '/quiet', '/norestart')
+        Wait         = $true
+        PassThru     = $true
+    }
+    $process = Start-Process @processParams
+
+    if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
+        throw "Installer returned non-zero exit code: $($process.ExitCode)"
+    }
+
+    Update-SessionPath
+    $newSdks = @(Get-InstalledDotNetSdk10Versions)
+    if ($newSdks) {
+        Write-Log ('.NET SDK installed: {0}' -f ($newSdks -join ', ')) -Level SUCCESS
+    }
+    else {
+        Write-Log 'SDK installer succeeded but version was not detected.' -Level WARN
+    }
+
+    Remove-Item -Path $installerPath -Force -ErrorAction SilentlyContinue
     Write-Log 'Install finished' -Level SUCCESS
     exit 0
 }
