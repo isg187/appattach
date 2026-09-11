@@ -12,7 +12,7 @@
     Temporary folder for the offline bundle and license.
 
 .EXAMPLE
-    .\install-msix-packaging-tool.ps1
+    .\install-msixtool.ps1
 #>
 
 #Requires -RunAsAdministrator
@@ -25,6 +25,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$ConfirmPreference = 'None'
 
 $script:DriverName = 'Msix.PackagingTool.Driver~~~~0.0.1.0'
 $script:AppxName = '*MsixPackagingTool*'
@@ -64,33 +66,8 @@ function Get-MsixDriverState {
     Get-WindowsCapability -Online -Name $script:DriverName -ErrorAction SilentlyContinue
 }
 
-function Install-MsixDriver {
-    $cap = Get-MsixDriverState
-    if (-not $cap) {
-        throw ("Windows capability not found: {0}" -f $script:DriverName)
-    }
-
-    if ($cap.State -eq 'Installed' -and -not $Force) {
-        Write-Log 'MSIX Packaging Tool Driver already installed' -Level SUCCESS
-        return
-    }
-
-    Write-Log 'Installing MSIX Packaging Tool Driver'
-    $result = Add-WindowsCapability -Online -Name $script:DriverName
-    $cap = Get-MsixDriverState
-
-    if ($cap.State -ne 'Installed') {
-        throw ("Driver install did not complete. State={0}" -f $cap.State)
-    }
-
-    Write-Log 'MSIX Packaging Tool Driver installed' -Level SUCCESS
-    if ($result -and $result.RestartNeeded) {
-        Write-Log 'A restart is required to finish the driver install.' -Level WARN
-    }
-}
-
 function Get-InstalledMsixPackagingTool {
-    Get-AppxPackage -Name $script:AppxName -AllUsers -ErrorAction SilentlyContinue |
+    Get-AppxPackage -Name $script:AppxName -ErrorAction SilentlyContinue |
     Sort-Object Version |
     Select-Object -Last 1
 }
@@ -119,60 +96,87 @@ else {
 Write-Log 'Starting MSIX Packaging Tool and driver install'
 
 try {
-    Install-MsixDriver
+    $cap = Get-MsixDriverState
+    $tool = Get-InstalledMsixPackagingTool
 
-    $installed = Get-InstalledMsixPackagingTool
-    if ($installed -and -not $Force) {
-        Write-Log ('MSIX Packaging Tool already installed: {0}' -f $installed.Version) -Level SUCCESS
+    if ($cap -and $cap.State -eq 'Installed' -and $tool -and -not $Force) {
+        Write-Log ('MSIX Packaging Tool already installed: {0}' -f $tool.Version) -Level SUCCESS
         Write-Log 'Install finished' -Level SUCCESS
         exit 0
     }
 
-    if (-not (Test-Path $DownloadPath)) {
-        New-Item -ItemType Directory -Path $DownloadPath -Force | Out-Null
+    if (-not $cap) {
+        throw ("Windows capability not found: {0}" -f $script:DriverName)
     }
 
-    $bundlePath = Join-Path $DownloadPath (Split-Path $script:BundleUrl -Leaf)
-    $licensePath = Join-Path $DownloadPath (Split-Path $script:LicenseUrl -Leaf)
+    if ($cap.State -ne 'Installed' -or $Force) {
+        Write-Log 'Installing MSIX Packaging Tool Driver from Windows Update'
+        $dismLog = Join-Path $DownloadPath 'dism-driver.log'
+        if (-not (Test-Path $DownloadPath)) {
+            New-Item -ItemType Directory -Path $DownloadPath -Force | Out-Null
+        }
 
-    Write-Log 'Downloading official MSIX Packaging Tool bundle and license'
-    $ProgressPreference = 'SilentlyContinue'
-    Invoke-WebRequest -Uri $script:BundleUrl -OutFile $bundlePath -UseBasicParsing
-    Invoke-WebRequest -Uri $script:LicenseUrl -OutFile $licensePath -UseBasicParsing
+        $dismArgs = @(
+            '/Online'
+            '/Add-Capability'
+            ('/CapabilityName:{0}' -f $script:DriverName)
+            '/NoRestart'
+            '/Quiet'
+            ('/LogPath:{0}' -f $dismLog)
+        )
+        $processParams = @{
+            FilePath     = "$env:SystemRoot\System32\dism.exe"
+            ArgumentList = $dismArgs
+            Wait         = $true
+            PassThru     = $true
+            WindowStyle  = 'Hidden'
+        }
+        $process = Start-Process @processParams
 
-    if (-not (Test-Path $bundlePath) -or (Get-Item $bundlePath).Length -lt 1MB) {
-        throw 'Offline bundle download failed or file is too small.'
+        $cap = Get-MsixDriverState
+        if ($process.ExitCode -ne 0 -and $cap.State -ne 'Installed') {
+            throw ("DISM driver install failed. ExitCode={0}. See {1}" -f $process.ExitCode, $dismLog)
+        }
+
+        Write-Log 'MSIX Packaging Tool Driver installed' -Level SUCCESS
+        if ($process.ExitCode -eq 3010) {
+            Write-Log 'A restart is required to finish the driver install.' -Level WARN
+        }
     }
-    if (-not (Test-Path $licensePath)) {
-        throw 'Offline license download failed.'
+    else {
+        Write-Log 'MSIX Packaging Tool Driver already installed' -Level SUCCESS
     }
 
-    Test-BundleIntegrity -Path $bundlePath
+    if (-not $tool -or $Force) {
+        if (-not (Test-Path $DownloadPath)) {
+            New-Item -ItemType Directory -Path $DownloadPath -Force | Out-Null
+        }
 
-    Write-Log 'Installing MSIX Packaging Tool from offline bundle'
-    $provisionParams = @{
-        Online      = $true
-        PackagePath = $bundlePath
-        LicensePath = $licensePath
+        $bundlePath = Join-Path $DownloadPath (Split-Path $script:BundleUrl -Leaf)
+        $licensePath = Join-Path $DownloadPath (Split-Path $script:LicenseUrl -Leaf)
+
+        Write-Log 'Downloading official MSIX Packaging Tool bundle and license'
+        Invoke-WebRequest -Uri $script:BundleUrl -OutFile $bundlePath -UseBasicParsing
+        Invoke-WebRequest -Uri $script:LicenseUrl -OutFile $licensePath -UseBasicParsing
+
+        if (-not (Test-Path $bundlePath) -or (Get-Item $bundlePath).Length -lt 1MB) {
+            throw 'Offline bundle download failed or file is too small.'
+        }
+
+        Test-BundleIntegrity -Path $bundlePath
+        Write-Log 'Installing MSIX Packaging Tool'
+        Add-AppxPackage -Path $bundlePath -ForceApplicationShutdown -Confirm:$false
+        Remove-Item -Path $bundlePath, $licensePath -Force -ErrorAction SilentlyContinue
     }
-    Add-AppxProvisionedPackage @provisionParams | Out-Null
 
-    $addParams = @{
-        Path                     = $bundlePath
-        ForceApplicationShutdown = $true
-        ErrorAction              = 'SilentlyContinue'
-    }
-    Add-AppxPackage @addParams
-
-    $installed = Get-InstalledMsixPackagingTool
-    if ($installed) {
-        Write-Log ('MSIX Packaging Tool ready: {0}' -f $installed.Version) -Level SUCCESS
+    $tool = Get-InstalledMsixPackagingTool
+    if ($tool) {
+        Write-Log ('MSIX Packaging Tool ready: {0}' -f $tool.Version) -Level SUCCESS
     }
     else {
         Write-Log 'Tool install completed but package was not detected.' -Level WARN
     }
 
-    Remove-Item -Path $bundlePath, $licensePath -Force -ErrorAction SilentlyContinue
     Write-Log 'Install finished' -Level SUCCESS
     exit 0
 }
