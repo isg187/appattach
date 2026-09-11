@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    Installs the MSIX Packaging Tool Driver and the latest MSIX Packaging Tool.
+    Installs the MSIX Packaging Tool Driver and the offline MSIX Packaging Tool.
 
 .PARAMETER Force
     Reinstall even if already present.
@@ -9,13 +9,10 @@
     Full path to the log file.
 
 .PARAMETER DownloadPath
-    Temporary folder for the offline bundle fallback.
+    Temporary folder for the offline bundle and license.
 
 .EXAMPLE
     .\install-msix-packaging-tool.ps1
-
-.EXAMPLE
-    .\install-msix-packaging-tool.ps1 -Force
 #>
 
 #Requires -RunAsAdministrator
@@ -30,9 +27,9 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $script:DriverName = 'Msix.PackagingTool.Driver~~~~0.0.1.0'
-$script:WingetId = 'Microsoft.MSIXPackagingTool'
 $script:AppxName = '*MsixPackagingTool*'
-$script:OfflineBundleUrl = 'https://download.microsoft.com/download/e/2/e/e2e923b2-7a3a-4730-969d-ab37001fbb5e/MSIXPackagingtoolv1.2024.405.0.msixbundle'
+$script:BundleUrl = 'https://download.microsoft.com/download/e/2/e/e2e923b2-7a3a-4730-969d-ab37001fbb5e/MSIXPackagingtoolv1.2024.405.0.msixbundle'
+$script:LicenseUrl = 'https://download.microsoft.com/download/e/2/e/e2e923b2-7a3a-4730-969d-ab37001fbb5e/MSIXPackagingtoolv1.2024.405.0.License.xml'
 
 function Write-Log {
     [CmdletBinding()]
@@ -50,10 +47,10 @@ function Write-Log {
     $entry = '[{0}] [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
 
     switch ($Level) {
-        'ERROR'   { Write-Host $entry -ForegroundColor Red }
-        'WARN'    { Write-Host $entry -ForegroundColor Yellow }
+        'ERROR' { Write-Host $entry -ForegroundColor Red }
+        'WARN' { Write-Host $entry -ForegroundColor Yellow }
         'SUCCESS' { Write-Host $entry -ForegroundColor Green }
-        default   { Write-Host $entry }
+        default { Write-Host $entry }
     }
 
     $logDir = Split-Path $script:LogPath -Parent
@@ -64,9 +61,7 @@ function Write-Log {
 }
 
 function Get-MsixDriverState {
-    $cap = Get-WindowsCapability -Online -Name $script:DriverName -ErrorAction SilentlyContinue
-    if (-not $cap) { return $null }
-    return $cap
+    Get-WindowsCapability -Online -Name $script:DriverName -ErrorAction SilentlyContinue
 }
 
 function Install-MsixDriver {
@@ -80,23 +75,15 @@ function Install-MsixDriver {
         return
     }
 
-    if ($cap.State -eq 'Installed' -and $Force) {
-        Write-Log 'MSIX Packaging Tool Driver already installed; Force specified, adding again' -Level WARN
-    }
-    else {
-        Write-Log 'Installing MSIX Packaging Tool Driver from Windows Update'
-    }
-
+    Write-Log 'Installing MSIX Packaging Tool Driver'
     $result = Add-WindowsCapability -Online -Name $script:DriverName
     $cap = Get-MsixDriverState
 
-    if ($cap.State -eq 'Installed') {
-        Write-Log 'MSIX Packaging Tool Driver installed' -Level SUCCESS
-    }
-    else {
+    if ($cap.State -ne 'Installed') {
         throw ("Driver install did not complete. State={0}" -f $cap.State)
     }
 
+    Write-Log 'MSIX Packaging Tool Driver installed' -Level SUCCESS
     if ($result -and $result.RestartNeeded) {
         Write-Log 'A restart is required to finish the driver install.' -Level WARN
     }
@@ -104,95 +91,21 @@ function Install-MsixDriver {
 
 function Get-InstalledMsixPackagingTool {
     Get-AppxPackage -Name $script:AppxName -AllUsers -ErrorAction SilentlyContinue |
-        Sort-Object Version |
-        Select-Object -Last 1
+    Sort-Object Version |
+    Select-Object -Last 1
 }
 
-function Get-WingetExe {
-    $cmd = Get-Command winget -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
+function Test-BundleIntegrity {
+    param([string]$Path)
 
-    $candidates = @(
-        (Join-Path $env:LocalAppData 'Microsoft\WindowsApps\winget.exe'),
-        (Join-Path $env:ProgramFiles 'WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe')
-    )
-    foreach ($path in $candidates) {
-        $resolved = Get-Item $path -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($resolved) { return $resolved.FullName }
-    }
-    return $null
-}
-
-function Install-MsixPackagingToolViaWinget {
-    $winget = Get-WingetExe
-    if (-not $winget) { return $false }
-
-    $installed = Get-InstalledMsixPackagingTool
-    if ($installed -and $Force) {
-        Write-Log ('Upgrading MSIX Packaging Tool from {0} via winget' -f $installed.Version)
-        $verb = 'upgrade'
-    }
-    elseif ($installed) {
-        Write-Log ('Upgrading MSIX Packaging Tool from {0} via winget' -f $installed.Version)
-        $verb = 'upgrade'
-    }
-    else {
-        Write-Log 'Installing latest MSIX Packaging Tool via winget'
-        $verb = 'install'
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Integrity check failed: file not found: $Path"
     }
 
-    $wingetArgs = @(
-        $verb
-        '--exact'
-        '--id'
-        $script:WingetId
-        '--silent'
-        '--accept-package-agreements'
-        '--accept-source-agreements'
-        '--disable-interactivity'
-    )
-
-    $processParams = @{
-        FilePath     = $winget
-        ArgumentList = $wingetArgs
-        Wait         = $true
-        PassThru     = $true
-        NoNewWindow  = $true
-    }
-    $process = Start-Process @processParams
-
-    if ($process.ExitCode -eq 0) { return $true }
-
-    # Already current is still success for upgrade.
-    if ($verb -eq 'upgrade' -and $process.ExitCode -eq -1978335189) { return $true }
-
-    Write-Log ('winget {0} exited {1}; trying offline bundle' -f $verb, $process.ExitCode) -Level WARN
-    return $false
-}
-
-function Install-MsixPackagingToolOffline {
-    if (-not (Test-Path $DownloadPath)) {
-        New-Item -ItemType Directory -Path $DownloadPath -Force | Out-Null
-    }
-
-    $bundlePath = Join-Path $DownloadPath (Split-Path $script:OfflineBundleUrl -Leaf)
-    Write-Log 'Downloading official MSIX Packaging Tool bundle'
-
-    $ProgressPreference = 'SilentlyContinue'
-    Invoke-WebRequest -Uri $script:OfflineBundleUrl -OutFile $bundlePath -UseBasicParsing
-
-    if (-not (Test-Path $bundlePath) -or (Get-Item $bundlePath).Length -lt 1MB) {
-        throw 'Offline bundle download failed or file is too small.'
-    }
-
-    $sig = Get-AuthenticodeSignature -FilePath $bundlePath
+    $sig = Get-AuthenticodeSignature -FilePath $Path
     if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notlike '*Microsoft*') {
         throw ("Bundle signature check failed. Status={0}" -f $sig.Status)
     }
-
-    Write-Log 'Installing MSIX Packaging Tool from offline bundle'
-    Add-AppxPackage -Path $bundlePath -ForceApplicationShutdown -ErrorAction Stop
-    Remove-Item -Path $bundlePath -Force -ErrorAction SilentlyContinue
 }
 
 if ($LogPath) {
@@ -215,10 +128,41 @@ try {
         exit 0
     }
 
-    $wingetOk = Install-MsixPackagingToolViaWinget
-    if (-not $wingetOk) {
-        Install-MsixPackagingToolOffline
+    if (-not (Test-Path $DownloadPath)) {
+        New-Item -ItemType Directory -Path $DownloadPath -Force | Out-Null
     }
+
+    $bundlePath = Join-Path $DownloadPath (Split-Path $script:BundleUrl -Leaf)
+    $licensePath = Join-Path $DownloadPath (Split-Path $script:LicenseUrl -Leaf)
+
+    Write-Log 'Downloading official MSIX Packaging Tool bundle and license'
+    $ProgressPreference = 'SilentlyContinue'
+    Invoke-WebRequest -Uri $script:BundleUrl -OutFile $bundlePath -UseBasicParsing
+    Invoke-WebRequest -Uri $script:LicenseUrl -OutFile $licensePath -UseBasicParsing
+
+    if (-not (Test-Path $bundlePath) -or (Get-Item $bundlePath).Length -lt 1MB) {
+        throw 'Offline bundle download failed or file is too small.'
+    }
+    if (-not (Test-Path $licensePath)) {
+        throw 'Offline license download failed.'
+    }
+
+    Test-BundleIntegrity -Path $bundlePath
+
+    Write-Log 'Installing MSIX Packaging Tool from offline bundle'
+    $provisionParams = @{
+        Online      = $true
+        PackagePath = $bundlePath
+        LicensePath = $licensePath
+    }
+    Add-AppxProvisionedPackage @provisionParams | Out-Null
+
+    $addParams = @{
+        Path                     = $bundlePath
+        ForceApplicationShutdown = $true
+        ErrorAction              = 'SilentlyContinue'
+    }
+    Add-AppxPackage @addParams
 
     $installed = Get-InstalledMsixPackagingTool
     if ($installed) {
@@ -228,6 +172,7 @@ try {
         Write-Log 'Tool install completed but package was not detected.' -Level WARN
     }
 
+    Remove-Item -Path $bundlePath, $licensePath -Force -ErrorAction SilentlyContinue
     Write-Log 'Install finished' -Level SUCCESS
     exit 0
 }

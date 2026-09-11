@@ -6,6 +6,8 @@
     Idempotent installer for 7-Zip 64-bit.
     Prefers the MSI when available; falls back to EXE.
     Source: official GitHub releases (ip7z/7zip).
+    Official 7-Zip installers are often unsigned; Authenticode is checked
+    when present, otherwise the SHA-256 is recorded.
 
 .PARAMETER Force
     Reinstall even if 7-Zip is already present.
@@ -85,8 +87,10 @@ function Test-InstallerIntegrity {
         throw "Integrity check failed: file not found: $Path"
     }
 
+    $actualHash = (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+    Write-Log ('SHA256: {0}' -f $actualHash)
+
     if ($ExpectedSha256) {
-        $actualHash = (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToUpperInvariant()
         $expected = $ExpectedSha256.Trim().ToUpperInvariant()
         if ($actualHash -ne $expected) {
             throw "SHA-256 mismatch. Expected $expected but got $actualHash"
@@ -94,21 +98,22 @@ function Test-InstallerIntegrity {
     }
 
     $sig = Get-AuthenticodeSignature -FilePath $Path
-    if ($sig.Status -ne 'Valid') {
-        throw "Authenticode signature is not valid. Status=$($sig.Status)"
+    if ($sig.Status -eq 'Valid') {
+        $subject = $sig.SignerCertificate.Subject
+        $matched = $false
+        foreach ($pub in $ExpectedPublishers) {
+            if ($subject -like "*$pub*") {
+                $matched = $true
+                break
+            }
+        }
+        if (-not $matched) {
+            throw "Unexpected publisher. Subject='$subject'"
+        }
+        return
     }
 
-    $subject = $sig.SignerCertificate.Subject
-    $matched = $false
-    foreach ($pub in $ExpectedPublishers) {
-        if ($subject -like "*$pub*") {
-            $matched = $true
-            break
-        }
-    }
-    if (-not $matched) {
-        throw "Unexpected publisher. Subject='$subject'"
-    }
+    Write-Log ('Authenticode not valid ({0}); 7-Zip installers are often unsigned' -f $sig.Status) -Level WARN
 }
 
 function Get-Installed7ZipVersion {
@@ -213,7 +218,7 @@ try {
 
     $integrityParams = @{
         Path               = $installerPath
-        ExpectedPublishers = @('Igor Pavlov', '7-Zip', 'Microsoft')
+        ExpectedPublishers = @('Igor Pavlov', '7-Zip')
     }
     if ($ExpectedSha256) {
         $integrityParams['ExpectedSha256'] = $ExpectedSha256
