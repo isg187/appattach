@@ -10,7 +10,7 @@
 #>
 
 $ErrorActionPreference = 'Stop'
-$Destination = "C:\ProgramData\SDL\scripts"
+$Destination = "C:\ProgramData\SDL\scripts\appattach"
 $TempPath = "C:\Temp\SoftwareInstall"
 $RepoZipUrl = "https://github.com/isg187/appattach/archive/refs/heads/main.zip"
 $InstallDir = Join-Path $Destination "install"
