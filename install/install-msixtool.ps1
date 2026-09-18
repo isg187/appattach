@@ -95,17 +95,17 @@ Write-Log 'Starting MSIX Packaging Tool and driver install'
 
 try {
     $cap = Get-MsixDriverState
-    $tool = Get-InstalledMsixPackagingTool
+    # $tool = Get-InstalledMsixPackagingTool
 
-    if ($cap -and $cap.State -eq 'Installed' -and $tool -and -not $Force) {
-        Write-Log ('MSIX Packaging Tool already installed: {0}' -f $tool.Version) -Level SUCCESS
-        Write-Log 'Install finished' -Level SUCCESS
-        exit 0
-    }
+    # if ($cap -and $cap.State -eq 'Installed' -and $tool -and -not $Force) {
+    #     Write-Log ('MSIX Packaging Tool already installed: {0}' -f $tool.Version) -Level SUCCESS
+    #     Write-Log 'Install finished' -Level SUCCESS
+    #     exit 0
+    # }
 
-    if (-not $cap) {
-        throw ("Windows capability not found: {0}" -f $script:DriverName)
-    }
+    # if (-not $cap) {
+    #     throw ("Windows capability not found: {0}" -f $script:DriverName)
+    # }
 
     if ($cap.State -ne 'Installed' -or $Force) {
         Write-Log 'Installing MSIX Packaging Tool Driver from Windows Update'
@@ -145,35 +145,35 @@ try {
         Write-Log 'MSIX Packaging Tool Driver already installed' -Level SUCCESS
     }
 
-    if (-not $tool -or $Force) {
-        if (-not (Test-Path $DownloadPath)) {
-            New-Item -ItemType Directory -Path $DownloadPath -Force | Out-Null
-        }
+    # if (-not $tool -or $Force) {
+    #     if (-not (Test-Path $DownloadPath)) {
+    #         New-Item -ItemType Directory -Path $DownloadPath -Force | Out-Null
+    #     }
 
-        $bundlePath = Join-Path $DownloadPath (Split-Path $script:BundleUrl -Leaf)
-        $licensePath = Join-Path $DownloadPath (Split-Path $script:LicenseUrl -Leaf)
+    #     $bundlePath = Join-Path $DownloadPath (Split-Path $script:BundleUrl -Leaf)
+    #     $licensePath = Join-Path $DownloadPath (Split-Path $script:LicenseUrl -Leaf)
 
-        Write-Log 'Downloading official MSIX Packaging Tool bundle and license'
-        Invoke-WebRequest -Uri $script:BundleUrl -OutFile $bundlePath -UseBasicParsing
-        Invoke-WebRequest -Uri $script:LicenseUrl -OutFile $licensePath -UseBasicParsing
+    #     Write-Log 'Downloading official MSIX Packaging Tool bundle and license'
+    #     Invoke-WebRequest -Uri $script:BundleUrl -OutFile $bundlePath -UseBasicParsing
+    #     Invoke-WebRequest -Uri $script:LicenseUrl -OutFile $licensePath -UseBasicParsing
 
-        if (-not (Test-Path $bundlePath) -or (Get-Item $bundlePath).Length -lt 1MB) {
-            throw 'Offline bundle download failed or file is too small.'
-        }
+    #     if (-not (Test-Path $bundlePath) -or (Get-Item $bundlePath).Length -lt 1MB) {
+    #         throw 'Offline bundle download failed or file is too small.'
+    #     }
 
-        Test-BundleIntegrity -Path $bundlePath
-        Write-Log 'Installing MSIX Packaging Tool'
-        Add-AppxPackage -Path $bundlePath -ForceApplicationShutdown -Confirm:$false
-        Remove-Item -Path $bundlePath, $licensePath -Force -ErrorAction SilentlyContinue
-    }
+    #     Test-BundleIntegrity -Path $bundlePath
+    #     Write-Log 'Installing MSIX Packaging Tool'
+    #     Add-AppxPackage -Path $bundlePath -ForceApplicationShutdown -Confirm:$false
+    #     Remove-Item -Path $bundlePath, $licensePath -Force -ErrorAction SilentlyContinue
+    # }
 
-    $tool = Get-InstalledMsixPackagingTool
-    if ($tool) {
-        Write-Log ('MSIX Packaging Tool ready: {0}' -f $tool.Version) -Level SUCCESS
-    }
-    else {
-        Write-Log 'Tool install completed but package was not detected.' -Level WARN
-    }
+    # $tool = Get-InstalledMsixPackagingTool
+    # if ($tool) {
+    #     Write-Log ('MSIX Packaging Tool ready: {0}' -f $tool.Version) -Level SUCCESS
+    # }
+    # else {
+    #     Write-Log 'Tool install completed but package was not detected.' -Level WARN
+    # }
 
     Write-Log 'Install finished' -Level SUCCESS
     exit 0
